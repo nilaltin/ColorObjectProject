@@ -1,0 +1,151 @@
+---
+title: "Color Blur Object Project"
+author: "Geoff"
+date: "2025-11-04"
+output: html_document
+---
+
+```{r message = FALSE, warning = FALSE }
+# Packages
+library(dplyr)
+library(ggplot2)
+library(lme4)
+library(lmerTest)  # glmer ok; p-values from LRTs
+library(car)       # Type II/III Anova
+library(broom.mixed)
+
+library(readxl)
+
+
+```
+
+Load in the data and convert the factor color from TRUE and FALSE to 'color' and 'bw'
+
+```{r}
+
+# This is where 'all_data.xlsx' sits in your directory.
+# edit this for your own directory structure  
+dataDr <- 'C:/Users/Geoff Boynton/Documents/MATLAB/color_object_project'
+
+all_data <- read_excel(file.path(dataDr,'all_data.xlsx'))
+
+# Recode 'color' (TRUE/FALSE -> "color"/"bw"), put "color" first ---
+all_data <- all_data %>%
+  mutate(
+    color = factor(ifelse(color, "color", "bw"), levels = c("color", "bw"))
+  )
+
+```
+
+Run the logistic regression model
+
+```{r}
+# threshold for performance on images in experiment 3
+pcThresh = .5;  
+
+# Filter to Exp2 and pc > pcThresh for analysis ---
+exp2_data <- all_data %>%
+  filter(exp == "Exp2", pc > pcThresh) %>%
+  # Make diopter categorical; keep a sensible ordered scale
+  mutate(diopter = factor(diopter, levels = sort(unique(diopter))))
+
+# Make "0" as the reference diopter level (doesn't affect significance but it does affect the parameter values)
+if ("0" %in% levels(exp2_data$diopter)) {
+  exp2_data$diopter <- relevel(exp2_data$diopter, ref = "0")
+}
+
+# run the 'mixed logistic regression model with subject and image number as random effect factors'
+model <- glmer(
+  correct ~ diopter * color + (1 | subId) + (1|idnum),
+  data = exp2_data,
+  family = binomial,
+  control = glmerControl(optimizer = "bobyqa", optCtrl = list(maxfun = 2e5))
+)
+
+# Coefficients (Wald z) and Type II LR tests (p-values)
+# summary(model)
+Anova(model, type = 2, test.statistic = "Chisq")
+
+
+```
+Plot percent correct as a function of blur and color
+
+
+```{r}
+
+# Summary for plotting (means), still filtered pc > pcthresh
+summary_data <- exp2_data %>%
+  group_by(color, diopter) %>%
+  summarise(mean_correct = mean(correct, na.rm = TRUE), .groups = "drop")
+
+# Plot: points (filled by 'color') + lines (by 'color'), diopter on x ---
+ggplot(summary_data, aes(x = diopter, y = mean_correct, group = color, color = color)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(fill = color), shape = 21, size = 3, color = "black") +
+  scale_color_discrete(guide = "none") +  # hide line color legend; keep fill legend
+  labs(
+    x = "Diopter",
+    y = "Mean Correct",
+    fill = "Stimulus",
+    title = "Mean Correct by Diopter and Color (Exp2; pc > 0.65)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.minor = element_blank()
+  )
+
+```
+
+
+This next chunk visualizes the coeficients of the model (converted back to percent correct) with the SEM of parameter estimates as confidence intervals. It's not something we'd put in the paper, but it's a sanity check to see that the model is predicting the data well.
+
+```{r}
+## Predicted probabilities from the interaction model  ---
+
+# 1) Prediction grid (use the same factor levels as in the model data)
+pred_grid <- expand.grid(
+  diopter = levels(exp2_data$diopter),
+  color   = levels(exp2_data$color)
+)
+pred_grid$diopter <- factor(pred_grid$diopter, levels = levels(exp2_data$diopter))
+pred_grid$color   <- factor(pred_grid$color,   levels = levels(exp2_data$color))
+
+# 2) Design matrix for the FIXED part of the model 
+X <- model.matrix(~ diopter * color, data = pred_grid)
+
+# 3) Align columns of X to the order of the model’s fixed effects
+beta_hat <- lme4::fixef(model)
+X <- X[, names(beta_hat), drop = FALSE]   # ensure same columns/order
+
+# 4) Fixed-effects covariance and delta-method SEs on the link scale
+Vbeta  <- as.matrix(vcov(model))
+eta    <- as.numeric(X %*% beta_hat)
+se_eta <- sqrt(diag(X %*% Vbeta %*% t(X)))
+
+# 5) Transform to probabilities with sem CIs
+pred_grid$prob     <- plogis(eta)
+pred_grid$lower <- plogis(eta - se_eta)
+pred_grid$upper <- plogis(eta + se_eta)
+
+# 6) Plot: predicted probabilities (by diopter and color) with CIs
+ggplot(pred_grid, aes(x = diopter, y = prob, group = color, color = color)) +
+  geom_line(linewidth = 1) +
+  geom_point(aes(fill = color), shape = 21, size = 3, color = "black") +
+  geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.15, linewidth = 0.7) +
+  scale_y_continuous(limits = c(0, 1)) +
+  scale_color_discrete(guide = "none") +
+  labs(
+    x = "Diopter",
+    y = "Predicted Probability of Correct (±95% CI)",
+    fill = "Stimulus",
+    title = "GLMM Predicted Probabilities by Diopter and Color"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(panel.grid.minor = element_blank())
+
+
+```
+
+
+
+
